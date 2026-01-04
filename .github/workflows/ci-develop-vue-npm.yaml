@@ -1,4 +1,4 @@
-name: CI - Vue npm (v1.0.0)
+name: CI - Vue npm
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: 20.x
+  NODE_VERSION: 24.x
   CACHE_NAME: npm-cache
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x]
+        node-version: [24.x]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
