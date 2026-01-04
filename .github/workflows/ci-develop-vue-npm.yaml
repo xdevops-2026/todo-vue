@@ -106,12 +106,12 @@ jobs:
           retention-days: 7
 
       - name: Publish test summary
-        if: always()
+        if: hashFiles('test-report/**/*.json') != ''
         uses: dorny/test-reporter@v2.4.0
         with:
           name: Test Results
-          path: test-report/**/*.xml
-          reporter: java-junit
+          path: test-report/**/*.json
+          reporter: vitest-json
           fail-on-error: false
 
       - name: Build production bundle
