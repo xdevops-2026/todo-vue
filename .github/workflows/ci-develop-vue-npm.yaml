@@ -139,15 +139,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build image (load locally)
         uses: docker/build-push-action@v5
         with:
           context: ${{ steps.select-file.outputs.context }}
           file: ${{ steps.select-file.outputs.build_file }}
-          push: true
+          push: false
+          load: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop
           labels: |
             org.opencontainers.image.version=${{ needs.build-and-test-dist.outputs.version_id }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Scan built image for CVEs
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }}
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload image scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-scan-report
+          path: trivy-image.sarif
+          retention-days: 7
+
+      - name: Push image tags
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop
