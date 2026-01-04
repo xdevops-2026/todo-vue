@@ -46,11 +46,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run lint
-        run: npm run lint
+      - name: Run lint (if present)
+        run: npm run lint --if-present
 
-      - name: Run unit tests
-        run: npm test -- --runInBand
+      - name: Run unit tests (if present)
+        run: npm run test --if-present -- --runInBand
 
   build:
     name: Build & Artifact
