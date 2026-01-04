@@ -20,3 +20,5 @@ LABEL org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT_SHA}"
 
 EXPOSE 8080
+
+CMD ["nginx", "-g", "daemon off;"]
