@@ -54,7 +54,7 @@ jobs:
           # sanitize name for artifact/tag usage
           SAFE_NAME=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
           RUN_SUFFIX="b${GITHUB_RUN_NUMBER:-0}"
-          VERSION_ID="${PKG_VERSION}-${GITHUB_SHA::7}.${RUN_SUFFIX}"
+          VERSION_ID="${PKG_VERSION}-${GITHUB_SHA::7}-${RUN_SUFFIX}"
           ARTIFACT_NAME="${SAFE_NAME}-dist-${VERSION_ID}"
           echo "version_id=$VERSION_ID" >> $GITHUB_OUTPUT
           echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
