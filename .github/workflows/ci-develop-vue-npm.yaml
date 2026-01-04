@@ -2,6 +2,7 @@ name: CI - Vue npm
 
 permissions:
   contents: read
+  packages: write
 
 on:
   push:
@@ -13,6 +14,9 @@ on:
       - 'tests/**'
       - 'vite.config.*'
       - 'vitest.config.*'
+      - 'Dockerfile'
+      - 'Containerfile'
+      - 'containerfiles/**'
       - '.github/workflows/ci-develop-vue-npm.yaml'
   workflow_dispatch:
 
@@ -23,15 +27,13 @@ concurrency:
 env:
   NODE_VERSION: 24.x
   CACHE_NAME: npm-cache
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   lint-and-test:
-    name: Lint & Test (matrix)
+    name: Lint & Test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [24.x]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,7 +41,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -80,3 +82,54 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  build-image:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select container build file
+        id: select-file
+        run: |
+          if [ -f Containerfile ]; then
+            echo "build_file=Containerfile" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+          elif [ -f Dockerfile ]; then
+            echo "build_file=Dockerfile" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+          elif [ -f containerfiles/npm.Containerfile ]; then
+            echo "build_file=containerfiles/npm.Containerfile" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+          else
+            echo "No Containerfile or Dockerfile found" >&2
+            exit 1
+          fi
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vue-dist
+          path: dist
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.select-file.outputs.context }}
+          file: ${{ steps.select-file.outputs.build_file }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repository }}
