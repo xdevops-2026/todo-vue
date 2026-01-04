@@ -25,7 +25,6 @@ concurrency:
 
 env:
   NODE_VERSION: 24.x
-  CACHE_NAME: npm-cache
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
@@ -33,6 +32,9 @@ jobs:
   build-and-test-dist:
     name: Lint, Test & Build dist artifact
     runs-on: ubuntu-latest
+    outputs:
+      version_id: ${{ steps.set-version.outputs.version_id }}
+      artifact_name: ${{ steps.set-version.outputs.artifact_name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,6 +45,20 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
+
+      - name: Read version from package.json
+        id: set-version
+        run: |
+          PKG_VERSION=$(jq -r '.version // "0.0.0"' package.json)
+          PKG_NAME=$(jq -r '.name // "app"' package.json)
+          # sanitize name for artifact/tag usage
+          SAFE_NAME=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
+          RUN_SUFFIX="b${GITHUB_RUN_NUMBER:-0}"
+          VERSION_ID="${PKG_VERSION}-${GITHUB_SHA::7}.${RUN_SUFFIX}"
+          ARTIFACT_NAME="${SAFE_NAME}-dist-${VERSION_ID}"
+          echo "version_id=$VERSION_ID" >> $GITHUB_OUTPUT
+          echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+          echo "VERSION_ID=$VERSION_ID" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: npm ci
@@ -59,7 +75,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vue-dist
+          name: ${{ steps.set-version.outputs.artifact_name }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -81,9 +97,6 @@ jobs:
           elif [ -f Dockerfile ]; then
             echo "build_file=Dockerfile" >> $GITHUB_OUTPUT
             echo "context=." >> $GITHUB_OUTPUT
-          elif [ -f containerfiles/npm.Containerfile ]; then
-            echo "build_file=containerfiles/npm.Containerfile" >> $GITHUB_OUTPUT
-            echo "context=." >> $GITHUB_OUTPUT
           else
             echo "No Containerfile or Dockerfile found" >&2
             exit 1
@@ -92,7 +105,7 @@ jobs:
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
-          name: vue-dist
+          name: ${{ needs.build-and-test-dist.outputs.artifact_name }}
           path: dist
 
       - name: Login to GHCR
@@ -109,8 +122,8 @@ jobs:
           file: ${{ steps.select-file.outputs.build_file }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop
           labels: |
+            org.opencontainers.image.version=${{ needs.build-and-test-dist.outputs.version_id }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.repository }}
