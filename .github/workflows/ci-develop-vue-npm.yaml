@@ -3,6 +3,7 @@ name: CI - Vue npm
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 on:
   push:
