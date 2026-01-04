@@ -182,7 +182,8 @@ jobs:
       - name: Get pushed image digest
         id: get-digest
         run: |
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }})
+          DIGEST_WITH_REF=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }})
+          DIGEST=${DIGEST_WITH_REF#*@}
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
       - name: Attest image provenance
