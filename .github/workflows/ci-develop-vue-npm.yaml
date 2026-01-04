@@ -96,6 +96,24 @@ jobs:
       - name: Run unit tests (if present)
         run: npm run test --if-present -- --runInBand
 
+      - name: Upload test report (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: test-report/**/*
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish test summary
+        if: always()
+        uses: dorny/test-reporter@v2.4.0
+        with:
+          name: Test Results
+          path: test-report/**/*.xml
+          reporter: java-junit
+          fail-on-error: false
+
       - name: Build production bundle
         run: npm run build
 
