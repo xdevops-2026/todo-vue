@@ -1,0 +1,226 @@
+name: CI - Vue Release Candidate (npm)
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+on:
+  push:
+    branches: [ "release/*" ]
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'src/**'
+      - 'tests/**'
+      - 'vite.config.*'
+      - 'vitest.config.*'
+      - 'Dockerfile'
+      - 'Containerfile'
+      - '.github/workflows/ci-release-vue-npm.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 24.x
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_PLATFORM: linux/amd64
+
+jobs:
+  build-and-test-dist:
+    name: Lint, Test & Build dist artifact (RC)
+    runs-on: ubuntu-latest
+    outputs:
+      version_id: ${{ steps.set-version.outputs.version_id }}
+      artifact_name: ${{ steps.set-version.outputs.artifact_name }}
+      pkg_version_tag: ${{ steps.set-version.outputs.pkg_version_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Secret scan
+        uses: trufflesecurity/trufflehog@v3.92.4
+        with:
+          path: .
+          extra_args: --only-verified
+
+      - name: Scan for CVEs
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-fs.sarif
+
+      - name: Upload CVE scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cve-scan-report
+          path: trivy-fs.sarif
+          retention-days: 7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Read version from package.json
+        id: set-version
+        shell: bash
+        run: |
+          PKG_VERSION=$(jq -r '.version // "0.0.0"' package.json)
+          PKG_VERSION_TAG=$(echo "$PKG_VERSION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
+          PKG_NAME=$(jq -r '.name // "app"' package.json)
+
+          SAFE_NAME=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
+
+          RC_BUILD="${GITHUB_RUN_NUMBER:-0}"
+          SHA7="${GITHUB_SHA::7}"
+          VERSION_ID="${PKG_VERSION_TAG}-rc.${RC_BUILD}-${SHA7}"
+          ARTIFACT_NAME="${SAFE_NAME}-dist-${VERSION_ID}"
+
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "pkg_version_tag=$PKG_VERSION_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "VERSION_ID=$VERSION_ID" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint (if present)
+        run: npm run lint --if-present
+
+      - name: Run unit tests (if present)
+        run: npm run test --if-present -- --runInBand
+
+      - name: Upload test report (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: test-report/**/*
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish test summary
+        if: hashFiles('test-report/**/*.json') != ''
+        uses: dorny/test-reporter@v2.4.0
+        with:
+          name: Test Results
+          path: test-report/**/*.json
+          reporter: vitest-json
+          fail-on-error: false
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-version.outputs.artifact_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-image:
+    name: Build, Scan & Push RC Image
+    runs-on: ubuntu-latest
+    needs: build-and-test-dist
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select container build file
+        id: select-file
+        shell: bash
+        run: |
+          if [ -f Containerfile ]; then
+            echo "build_file=Containerfile" >> "$GITHUB_OUTPUT"
+            echo "context=." >> "$GITHUB_OUTPUT"
+          elif [ -f Dockerfile ]; then
+            echo "build_file=Dockerfile" >> "$GITHUB_OUTPUT"
+            echo "context=." >> "$GITHUB_OUTPUT"
+          else
+            echo "No Containerfile or Dockerfile found" >&2
+            exit 1
+          fi
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-and-test-dist.outputs.artifact_name }}
+          path: dist
+
+      - name: Prepare image metadata
+        id: meta
+        shell: bash
+        run: |
+          IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${{ needs.build-and-test-dist.outputs.version_id }}"
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push image (RC)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.select-file.outputs.context }}
+          file: ${{ steps.select-file.outputs.build_file }}
+          platforms: ${{ env.IMAGE_PLATFORM }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.pkg_version_tag }}-rc
+          labels: |
+            org.opencontainers.image.version=${{ needs.build-and-test-dist.outputs.version_id }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan built image for CVEs
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.meta.outputs.image_ref }}
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload image scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-scan-report
+          path: trivy-image.sarif
+          retention-days: 7
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
