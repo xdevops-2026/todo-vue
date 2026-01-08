@@ -1,0 +1,201 @@
+name: CD - GitOps (develop)
+
+on:
+  workflow_run:
+    # IMPORTANT: Use the upstream workflow "name:" here (not the filename).
+    workflows: ["CI - Vue npm"]
+    types: [completed]
+
+  # Allow manual trigger for troubleshooting/retries.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Required for manual runs: the image tag to write into the GitOps repo (workflow_run will read it from the CI artifact)."
+        required: true
+        type: string
+      gitops_repo:
+        description: "Optional override GitOps repo (owner/repo). Defaults to vars.GITOPS_REPO."
+        required: false
+        type: string
+      values_file:
+        description: "Optional override Helm values file path. Defaults to vars.GITOPS_VALUES_FILE."
+        required: false
+        type: string
+      yq_tag_path:
+        description: "Optional override yq path for tag update (e.g. .image.tag). Defaults to vars.GITOPS_IMAGE_TAG_YQ_PATH."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+  # Recommended Repository Variables:
+  # - vars.GITOPS_REPO:                e.g. "my-org/my-app-gitops"
+  # - vars.GITOPS_REF:                 e.g. "main" (or "develop")
+  # - vars.GITOPS_VALUES_FILE:         e.g. "environments/dev/values.yaml"
+  # - vars.GITOPS_IMAGE_TAG_YQ_PATH:   e.g. ".image.tag"
+  #
+  # Required Secret:
+  # - secrets.GITOPS_PUSH_TOKEN: PAT / fine-grained token with Contents: Read/Write to the GitOps repo
+  #
+  # NOTE: workflow_dispatch inputs may be absent for non-manual events, so we read via github.event.inputs.
+  GITOPS_REPO: ${{ github.event.inputs.gitops_repo || vars.GITOPS_REPO }}
+  GITOPS_REF: ${{ vars.GITOPS_REF || 'main' }}
+  GITOPS_VALUES_FILE: ${{ github.event.inputs.values_file || vars.GITOPS_VALUES_FILE }}
+  GITOPS_IMAGE_TAG_YQ_PATH: ${{ github.event.inputs.yq_tag_path || vars.GITOPS_IMAGE_TAG_YQ_PATH || '.image.tag' }}
+  MANUAL_IMAGE_TAG: ${{ github.event.inputs.image_tag || '' }}
+
+jobs:
+  update-gitops-dev:
+    name: Update dev helm values to trigger GitOps CD
+    runs-on: ubuntu-latest
+
+    # Only auto-run when CI succeeded on develop; manual runs are always allowed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop')
+
+    steps:
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITOPS_REPO:-}" ]; then
+            echo "Missing vars.GITOPS_REPO (or workflow_dispatch input gitops_repo)." >&2
+            exit 1
+          fi
+          if [ -z "${GITOPS_VALUES_FILE:-}" ]; then
+            echo "Missing vars.GITOPS_VALUES_FILE (or workflow_dispatch input values_file)." >&2
+            exit 1
+          fi
+          if [ -z "${{ secrets.GITOPS_PUSH_TOKEN }}" ]; then
+            echo "Missing secrets.GITOPS_PUSH_TOKEN." >&2
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "${MANUAL_IMAGE_TAG:-}" ]; then
+            echo "For workflow_dispatch, please provide image_tag (so we update GitOps with a known existing image tag)." >&2
+            exit 1
+          fi
+
+      # For workflow_run: download the metadata artifact produced by the CI workflow run.
+      - name: Download CI image metadata artifact
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: image-metadata
+          path: ci-artifacts
+
+      - name: Resolve image tag (from CI artifact or manual input)
+        id: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${MANUAL_IMAGE_TAG:-}" ]; then
+            IMAGE_TAG="${MANUAL_IMAGE_TAG}"
+            IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "Using manual image tag: $IMAGE_TAG"
+          else
+            META_FILE="ci-artifacts/image-metadata.json"
+            if [ ! -f "$META_FILE" ]; then
+              echo "CI metadata artifact not found at $META_FILE" >&2
+              exit 1
+            fi
+
+            IMAGE_TAG=$(jq -r '.image_tag' "$META_FILE")
+            IMAGE_REF=$(jq -r '.image_ref' "$META_FILE")
+            IMAGE_DIGEST=$(jq -r '.image_digest' "$META_FILE")
+
+            if [ -z "$IMAGE_TAG" ] || [ "$IMAGE_TAG" = "null" ]; then
+              echo "Invalid image_tag in $META_FILE" >&2
+              cat "$META_FILE" >&2
+              exit 1
+            fi
+
+            echo "Resolved from CI artifact: tag=$IMAGE_TAG ref=$IMAGE_REF digest=$IMAGE_DIGEST"
+          fi
+
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          ref: ${{ env.GITOPS_REF }}
+          token: ${{ secrets.GITOPS_PUSH_TOKEN }}
+          path: gitops
+          fetch-depth: 0
+
+      - name: Install yq (binary)
+        shell: bash
+        run: |
+          set -euo pipefail
+          YQ_VERSION="v4.45.1"
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Update Helm values image tag
+        shell: bash
+        working-directory: gitops
+        env:
+          IMAGE_TAG: ${{ steps.compute.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          FILE="${GITOPS_VALUES_FILE}"
+          if [ ! -f "$FILE" ]; then
+            echo "Values file not found in GitOps repo: $FILE" >&2
+            echo "Repo: $GITOPS_REPO @ $GITOPS_REF" >&2
+            ls -la
+            exit 1
+          fi
+
+          echo "Updating $FILE: ${GITOPS_IMAGE_TAG_YQ_PATH} = $IMAGE_TAG"
+          yq -i "${GITOPS_IMAGE_TAG_YQ_PATH} = strenv(IMAGE_TAG)" "$FILE"
+
+          echo "Result preview:"
+          yq "${GITOPS_IMAGE_TAG_YQ_PATH}" "$FILE"
+
+      - name: Commit and push changes
+        shell: bash
+        working-directory: gitops
+        env:
+          IMAGE_TAG: ${{ steps.compute.outputs.image_tag }}
+          IMAGE_REF: ${{ steps.compute.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "No changes detected; skipping commit/push."
+            exit 0
+          fi
+
+          git status --porcelain
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${GITOPS_VALUES_FILE}"
+
+          # Include provenance details for auditability.
+          SRC_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          SRC_RUN_ID="${{ github.event.workflow_run.id || github.run_id }}"
+
+          git commit -m "chore(dev): bump image tag to ${IMAGE_TAG}" \
+            -m "image: ${IMAGE_REF}" \
+            -m "source: ${GITHUB_REPOSITORY}@${SRC_SHA}" \
+            -m "ci-run: ${SRC_RUN_ID}"
+
+          git push
