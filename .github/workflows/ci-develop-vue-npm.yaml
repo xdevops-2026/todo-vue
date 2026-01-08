@@ -205,6 +205,38 @@ jobs:
           DIGEST=${DIGEST_WITH_REF#*@}
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
+      - name: Generate image metadata artifact
+        id: image-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE_TAG="${{ needs.build-and-test-dist.outputs.version_id }}"
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test-dist.outputs.version_id }}"
+          IMAGE_DIGEST="${{ steps.get-digest.outputs.digest }}"
+
+          jq -n \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg image_ref "$IMAGE_REF" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg source_repo "${{ github.repository }}" \
+            --arg source_sha "${{ github.sha }}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg run_number "${{ github.run_number }}" \
+            --arg workflow "${{ github.workflow }}" \
+            '{image_tag:$image_tag,image_ref:$image_ref,image_digest:$image_digest,source_repo:$source_repo,source_sha:$source_sha,run_id:$run_id,run_number:$run_number,workflow:$workflow}' \
+            > image-metadata.json
+
+          echo "Wrote image-metadata.json:"
+          cat image-metadata.json
+
+      - name: Upload image metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata.json
+          retention-days: 7
+
       - name: Attest image provenance
         uses: actions/attest-build-provenance@v1
         with:
